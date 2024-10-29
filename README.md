@@ -1,6 +1,6 @@
-# delta-hedging
+# delta hedging strategy
 
-https://medium.com/zelos-research/how-to-implement-uniswap-delta-neutral-strategy-with-lending-protocol-eee10371a77f
+Code written based on this [research report](https://medium.com/zelos-research/how-to-implement-uniswap-delta-neutral-strategy-with-lending-protocol-eee10371a77f)
 
 steps:
 

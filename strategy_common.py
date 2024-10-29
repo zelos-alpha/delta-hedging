@@ -1,18 +1,17 @@
 import logging
 import os.path
+from datetime import date, timedelta
+from decimal import Decimal
 from typing import NamedTuple
 
 import pandas as pd
-from datetime import date, timedelta
-from decimal import Decimal
-
-from math_lib_v1 import optimize_delta_neutral
-from utils import load_from_trading_strategy, load_clmm_data_to_uni_lp_market
-
+from demeter import ChainType, Strategy, Actuator, MarketInfo, RowData, MarketTypeEnum, PeriodTrigger
 from demeter.aave import AaveV3Market
 from demeter.uniswap import UniV3Pool, UniLpMarket, V3CoreLib, base_unit_price_to_sqrt_price_x96
-from demeter import ChainType, Strategy, Actuator, MarketInfo, RowData, AtTimeTrigger, MarketTypeEnum, PeriodTrigger
+
 import config
+from math_lib_v1 import optimize_delta_neutral
+from utils import load_from_trading_strategy, load_clmm_data_to_uni_lp_market
 
 
 class Amounts(NamedTuple):
@@ -83,21 +82,14 @@ class CommonStrategy(Strategy):
     NET_VALUE_REBALANCE_RESTHOLD = Decimal("0.02")
 
     def initialize(self):
-        work_trigger = PeriodTrigger(
-            time_delta=timedelta(hours=1), trigger_immediately=True, do=self.work
-
-        )
+        work_trigger = PeriodTrigger(time_delta=timedelta(hours=1), trigger_immediately=True, do=self.work_on_the_hour)
         self.triggers.append(work_trigger)
 
     def invest(self, row_data: RowData):
         pass
 
-    def work(self, row_data: RowData):
+    def work_on_the_hour(self, row_data: RowData):
         pass
-
-    def first_run(self, row_data):
-        self.reset_funds()
-        self.invest(row_data)
 
     def calc_fund_param(self, h: float, l: float):
         optimize_res = optimize_delta_neutral(h, l, float(AAVE_POLYGON_USDC_ALPHA))

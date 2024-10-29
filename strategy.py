@@ -107,7 +107,7 @@ class DeltaHedgingStrategy(CommonStrategy):
         self.last_reposition_time = row_data.timestamp
         pass
 
-    def work(self, row_data: RowData):
+    def work_on_the_hour(self, row_data: RowData):
         if self.param:
             if (
                     not self.last_net_value * self.amount_change_lower
