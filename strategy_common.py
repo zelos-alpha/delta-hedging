@@ -3,7 +3,7 @@ import os.path
 from typing import NamedTuple
 
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, timedelta
 from decimal import Decimal
 
 from math_lib_v1 import optimize_delta_neutral
@@ -11,7 +11,7 @@ from utils import load_from_trading_strategy, load_clmm_data_to_uni_lp_market
 
 from demeter.aave import AaveV3Market
 from demeter.uniswap import UniV3Pool, UniLpMarket, V3CoreLib, base_unit_price_to_sqrt_price_x96
-from demeter import ChainType, Strategy, Actuator, MarketInfo, RowData, AtTimeTrigger, MarketTypeEnum
+from demeter import ChainType, Strategy, Actuator, MarketInfo, RowData, AtTimeTrigger, MarketTypeEnum, PeriodTrigger
 import config
 
 
@@ -25,7 +25,6 @@ class Amounts(NamedTuple):
 
 
 def generate_backtest():
-
     market_key_uni = MarketInfo("uni")
     market_key_aave = MarketInfo("aave", MarketTypeEnum.aave_v3)
 
@@ -63,6 +62,7 @@ def get_file_name(title, start: date, end: date):
 
 AAVE_POLYGON_USDC_ALPHA = Decimal("0.7")  # The rate of borrow eth and supply usdc
 
+
 class CommonStrategy(Strategy):
     def __init__(self, broker, market_uni, market_aave):
         super().__init__()
@@ -83,12 +83,16 @@ class CommonStrategy(Strategy):
     NET_VALUE_REBALANCE_RESTHOLD = Decimal("0.02")
 
     def initialize(self):
-        new_trigger = AtTimeTrigger(
-            time=datetime.combine(self.market_uni.data.index.min(), datetime.min.time()), do=self.first_run
+        work_trigger = PeriodTrigger(
+            time_delta=timedelta(hours=1), trigger_immediately=True, do=self.work
+
         )
-        self.triggers.append(new_trigger)
+        self.triggers.append(work_trigger)
 
     def invest(self, row_data: RowData):
+        pass
+
+    def work(self, row_data: RowData):
         pass
 
     def first_run(self, row_data):

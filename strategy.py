@@ -3,11 +3,9 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import NamedTuple
 
-import demeter
 import numpy as np
 import pandas as pd
-from demeter import RowData, Strategy, ActionTypeEnum
-from demeter.result import performance_metrics, MetricEnum
+from demeter import RowData, ActionTypeEnum
 
 import config
 from strategy_common import (
@@ -109,7 +107,7 @@ class DeltaHedgingStrategy(CommonStrategy):
         self.last_reposition_time = row_data.timestamp
         pass
 
-    def on_bar(self, row_data: RowData):
+    def work(self, row_data: RowData):
         if self.param:
             if (
                     not self.last_net_value * self.amount_change_lower
@@ -130,18 +128,17 @@ def run_single(upper_amp, lower_amp):
     actuator, broker, market_uni, market_aave = generate_backtest()
     actuator.strategy = DeltaHedgingStrategy(broker, market_uni, market_aave, (upper_amp, lower_amp))
 
+    load_data(actuator, market_uni, market_aave, config.APP.start, config.APP.end)
+    actuator.interval = "1h"
+    actuator.print_action = True
+    actuator.run()
+
     file_path = get_file_name(
         f"{upper_amp}-{lower_amp}",
         config.APP.start,
         config.APP.end,
     )
-    print(file_path)
-    if os.path.exists(os.path.join(config.APP.to_path, file_path + ".pkl")):
-        return
-    load_data(actuator, market_uni, market_aave, config.APP.start, config.APP.end)
-    actuator.interval = "1h"
-    actuator.run()
-    # actuator.save_result(config.APP.to_path, file_path)
+    actuator.save_result(config.APP.to_path, file_path)
 
 
 # ===========================================================================
