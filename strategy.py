@@ -1,55 +1,56 @@
+import logging
 import os.path
 from datetime import timedelta
 from decimal import Decimal
-from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
-from demeter import RowData, ActionTypeEnum
+from demeter import ActionTypeEnum
+from demeter import Strategy, Actuator, MarketInfo, RowData, MarketTypeEnum, PeriodTrigger
+from demeter.aave import AaveV3Market
+from demeter.uniswap import UniV3Pool, UniLpMarket, V3CoreLib, base_unit_price_to_sqrt_price_x96
 
 import config
-from strategy_common import (
-    generate_backtest,
-    CommonStrategy,
-    get_file_name,
-    AAVE_POLYGON_USDC_ALPHA,
-    Amounts,
-    load_data,
-)
+from _typing import Amounts, CurrentPosition
+from math_lib_v1 import optimize_delta_neutral
+from utils import load_data, get_file_name
 
 pd.options.display.max_columns = None
 pd.set_option("display.width", 5000)
 
+# The rate of borrow eth and supply usdc
+AAVE_POLYGON_USDC_ALPHA = Decimal("0.7")
+# when net value has changed over this resthold, will adjust the portfolio
+NET_VALUE_REBALANCE_RESTHOLD = Decimal("0.02")
 
-class CurrentPosition(NamedTuple):
-    h: Decimal
-    l: Decimal
-    sigma: Decimal
-    h_price: Decimal
-    l_price: Decimal
-    amounts: Amounts
-
-
-class DeltaHedgingStrategy(CommonStrategy):
+class DeltaHedgingStrategy(Strategy):
     """
 
     tick range: (1-sigma*LOWER_AMP ,1+sigma*UPPER_AMP)
     """
 
-    def __init__(self, broker, market_uni, market_aave, amp):
-        super().__init__(broker, market_uni, market_aave)
+    def __init__(self, amp):
+        super().__init__()
         self.fee0 = []
         self.fee1 = []
         self.last_collect_fee0 = 0
         self.last_collect_fee1 = 0
+        self.last_reposition_time = None
+        self.pause_investment = False
+        self.net_value_without_fee_list = []
+        self.base = market_uni.pool_info.base_token
+        self.quote = market_uni.pool_info.quote_token
         self.change_history = pd.Series()
         self.upper_amp, self.lower_amp = amp
-        self.amount_change_lower = Decimal(1) - DeltaHedgingStrategy.NET_VALUE_REBALANCE_RESTHOLD
-        self.amount_change_upper = Decimal(1) + DeltaHedgingStrategy.NET_VALUE_REBALANCE_RESTHOLD
+        self.amount_change_lower = Decimal(1) - NET_VALUE_REBALANCE_RESTHOLD
+        self.amount_change_upper = Decimal(1) + NET_VALUE_REBALANCE_RESTHOLD
         self.param = None
 
-    # when net value has changed over this resthold, will adjust the portfolio
-    NET_VALUE_REBALANCE_RESTHOLD = Decimal("0.02")
+
+
+    def initialize(self):
+        work_trigger = PeriodTrigger(time_delta=timedelta(hours=1), trigger_immediately=True, do=self.work_on_the_hour)
+        self.triggers.append(work_trigger)
 
     def get_sigma(self, row_data: RowData):
         if row_data.timestamp - timedelta(days=1) >= self.prices.index[0]:
@@ -120,13 +121,96 @@ class DeltaHedgingStrategy(CommonStrategy):
 
         self.invest(row_data)
 
+    def calc_fund_param(self, h: float, l: float):
+        optimize_res = optimize_delta_neutral(h, l, float(AAVE_POLYGON_USDC_ALPHA))
+        V_U_A, V_U_init, V_U_uni, V_E_uni, V_E_lend, V_U_lend = optimize_res[1]
+        amounts = Amounts(
+            usdc_aave_supply=Decimal(V_U_A),
+            usdc_uni_init=Decimal(V_U_init),
+            eth_uni_lp=Decimal(V_E_uni),
+            usdc_uni_lp=Decimal(V_U_uni),
+            eth_aave_borrow=Decimal(V_E_lend),
+            usdc_aave_borrow=Decimal(V_U_lend),
+        )
+        logging.debug(amounts)
+        return amounts
 
-# ===========================================================================
+    def reset_funds(self):
+        # withdraw all positions
+        if len(market_uni.positions) < 1:
+            return False
 
-def run_single(upper_amp, lower_amp):
-    global actuator, broker, market_uni, market_aave
-    actuator, broker, market_uni, market_aave = generate_backtest()
-    actuator.strategy = DeltaHedgingStrategy(broker, market_uni, market_aave, (upper_amp, lower_amp))
+        mb = market_uni.get_market_balance()
+
+        self.last_collect_fee0 += mb.base_uncollected
+        self.last_collect_fee1 += mb.quote_uncollected
+        market_uni.remove_all_liquidity()
+        for b_key in market_aave.borrow_keys:
+            swap_amount = market_aave.get_borrow(b_key).amount - broker.assets[config.weth].balance
+            if swap_amount > 0:
+                market_uni.buy(swap_amount * (1 + market_uni.pool_info.fee_rate))
+            market_aave.repay(b_key)
+        for s_key in market_aave.supply_keys:
+            market_aave.withdraw(s_key)
+        market_uni.sell(broker.assets[config.weth].balance)
+        return True
+
+    def get_cash_net_value(self, price: pd.Series):
+        return Decimal(sum([asset.balance * price[asset.name] for asset in broker.assets.values()]))
+
+    def get_net_value_without_fee(self, price):
+        cash = self.get_cash_net_value(price)
+        lp_value = 0
+        sqrt_price = base_unit_price_to_sqrt_price_x96(
+            price[config.weth.name],
+            market_uni.pool_info.token0.decimal,
+            market_uni.pool_info.token1.decimal,
+            market_uni.pool_info.is_token0_quote,
+        )
+        for pos_key, pos in market_uni.positions.items():
+            amount0, amount1 = V3CoreLib.get_token_amounts(
+                market_uni.pool_info, pos_key, sqrt_price, pos.liquidity
+            )
+            lp_value += amount0 * price[config.usdc.name] + amount1 * price[config.weth.name]
+
+        aave_status = market_aave.get_market_balance()
+        all_value = cash + aave_status.net_value + lp_value
+        # account_status = broker.get_account_status(price)
+        return all_value
+
+    def after_bar(self, row_data: RowData):
+        mb = market_uni.get_market_balance()
+        self.fee0.append(mb.base_uncollected + self.last_collect_fee0)
+        self.fee1.append(mb.quote_uncollected + self.last_collect_fee1)
+        value = self.get_net_value_without_fee(row_data.prices)
+        self.net_value_without_fee_list.append(value)
+
+        pass
+
+
+if __name__ == "__main__":
+    UPPER_AMP = Decimal("0.9")
+    LOWER_AMP = Decimal("0.5")
+
+    market_key_uni = MarketInfo("uni")
+    market_key_aave = MarketInfo("aave", MarketTypeEnum.aave_v3)
+
+    pool = UniV3Pool(config.usdc, config.weth, 0.05, config.usdc)
+    actuator = Actuator()
+    broker = actuator.broker
+
+    market_uni = UniLpMarket(market_key_uni, pool)
+
+    broker.add_market(market_uni)  # add market
+
+    market_aave = AaveV3Market(
+        market_key_aave, os.path.join(config.APP.aave_data_path, "risk-parameters.csv"), [config.usdc, config.weth]
+    )
+    market_aave.data_path = config.APP.aave_data_path
+    broker.add_market(market_aave)  # add market
+
+    broker.set_balance(config.usdc, 10000)  # set balance
+    actuator.strategy = DeltaHedgingStrategy((UPPER_AMP, LOWER_AMP))
 
     load_data(actuator, market_uni, market_aave, config.APP.start, config.APP.end)
     actuator.interval = "1h"
@@ -134,19 +218,8 @@ def run_single(upper_amp, lower_amp):
     actuator.run()
 
     file_path = get_file_name(
-        f"{upper_amp}-{lower_amp}",
+        f"{UPPER_AMP}-{LOWER_AMP}",
         config.APP.start,
         config.APP.end,
     )
     actuator.save_result(config.APP.to_path, file_path)
-
-
-# ===========================================================================
-
-if __name__ == "__main__":
-    UPPER_AMP = Decimal("0.9")
-    LOWER_AMP = Decimal("0.5")
-
-    actuator = broker = market_uni = market_aave = None
-
-    run_single(UPPER_AMP, LOWER_AMP)

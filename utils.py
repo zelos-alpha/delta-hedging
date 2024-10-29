@@ -11,6 +11,7 @@ from tradingstrategy.timebucket import TimeBucket
 from demeter import ChainType
 from demeter.uniswap import UniV3Pool, UniLpMarket
 from demeter.uniswap.data import fillna
+import config
 
 
 class TradingStrategyUtil:
@@ -32,16 +33,16 @@ class TradingStrategyUtil:
         for pool in pools:
             for pair in metadatas:
                 if (
-                    pair.token0_symbol == pool.token0.name
-                    and pair.token1_symbol == pool.token1.name
-                    and Decimal(str(pair.fee_tier)) == pool.fee_rate
+                        pair.token0_symbol == pool.token0.name
+                        and pair.token1_symbol == pool.token1.name
+                        and Decimal(str(pair.fee_tier)) == pool.fee_rate
                 ):
                     setattr(pool, "pair_id", pair.pair_id)
                     break
 
 
 def load_from_trading_strategy(
-    chain: ChainType, pools: List[UniV3Pool], start: datetime | date, end: datetime | date, api_key=None
+        chain: ChainType, pools: List[UniV3Pool], start: datetime | date, end: datetime | date, api_key=None
 ) -> pd.DataFrame:
     # Load pairs in all exchange
     if isinstance(start, date):
@@ -75,10 +76,10 @@ def load_from_trading_strategy(
 
 
 def load_clmm_data_to_uni_lp_market(
-    market: UniLpMarket,
-    df: pd.DataFrame,
-    start_date: datetime,
-    end_date: datetime,
+        market: UniLpMarket,
+        df: pd.DataFrame,
+        start_date: datetime,
+        end_date: datetime,
 ):
     assert isinstance(market, UniLpMarket)
     assert isinstance(df, pd.DataFrame)
@@ -122,3 +123,16 @@ def load_clmm_data_to_uni_lp_market(
 
     market.add_statistic_column(df)
     market.data = df
+
+
+def load_data(actuator, market_uni, market_aave, start_date, end_date):
+    pool_data = load_from_trading_strategy(
+        ChainType[config.CHAIN.name], [market_uni.pool_info], start_date, end_date, config.APP.ts_apikey
+    )
+    load_clmm_data_to_uni_lp_market(market_uni, pool_data, start_date, end_date)
+    market_aave.load_data(ChainType.ethereum, [config.usdc, config.weth], start_date, end_date)
+    actuator.set_price(market_uni.get_price_from_data())
+
+
+def get_file_name(title, start: date, end: date):
+    return f"{title}.{start.strftime('%Y%m%d')}~{end.strftime('%Y%m%d')}"
